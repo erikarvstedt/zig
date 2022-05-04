@@ -23,6 +23,27 @@ pub fn TrailerFlags(comptime Fields: type) type {
             inline for (@typeInfo(Fields).Struct.fields) |struct_field, i| {
                 fields[i] = Type.StructField{
                     .name = struct_field.name,
+                    .field_type = bool,
+                    .default_value = &false,
+                    .is_comptime = false,
+                    .alignment = @alignOf(bool),
+                };
+            }
+            break :blk @Type(.{
+                .Struct = .{
+                    .layout = .Auto,
+                    .fields = &fields,
+                    .decls = &.{},
+                    .is_tuple = false,
+                },
+            });
+        };
+
+        pub const FieldsStruct = blk: {
+            comptime var fields: [bit_count]Type.StructField = undefined;
+            inline for (@typeInfo(Fields).Struct.fields) |struct_field, i| {
+                fields[i] = Type.StructField{
+                    .name = struct_field.name,
                     .field_type = ?struct_field.field_type,
                     .default_value = &@as(?struct_field.field_type, null),
                     .is_comptime = false,
@@ -57,19 +78,19 @@ pub fn TrailerFlags(comptime Fields: type) type {
             self.bits |= 1 << field_index;
         }
 
-        /// `fields` is a struct with each field set to an optional value.
-        /// Only the non-null bits are observed and are used to set the flag bits.
+        /// `fields` is a boolean struct where each field that should be active is
+        /// set to `true`
         pub fn init(fields: InitStruct) Self {
             var self: Self = .{ .bits = 0 };
             inline for (@typeInfo(Fields).Struct.fields) |field, i| {
-                if (@field(fields, field.name)) |_|
+                if (@field(fields, field.name))
                     self.bits |= 1 << i;
             }
             return self;
         }
 
-        /// `fields` is a struct with each field set to an optional value (same as `init`).
-        pub fn setMany(self: Self, p: [*]align(@alignOf(Fields)) u8, fields: InitStruct) void {
+        /// `fields` is a struct with each field set to an optional value
+        pub fn setMany(self: Self, p: [*]align(@alignOf(Fields)) u8, fields: FieldsStruct) void {
             inline for (@typeInfo(Fields).Struct.fields) |field, i| {
                 if (@field(fields, field.name)) |value|
                     self.set(p, @intToEnum(FieldEnum, i), value);
@@ -142,7 +163,7 @@ test "TrailerFlags" {
 
     var flags = Flags.init(.{
         .b = true,
-        .c = 1234,
+        .c = true,
     });
     const slice = try testing.allocator.allocAdvanced(u8, 8, flags.sizeInBytes(), .exact);
     defer testing.allocator.free(slice);
