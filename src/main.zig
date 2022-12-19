@@ -765,6 +765,39 @@ fn cleanupModules(modules: *std.StringArrayHashMap(CliModule)) void {
     modules.deinit();
 }
 
+/// Used for caching the path to the global cache dir
+const GlobalCacheDir = struct {
+    dir: ?[]const u8 = null,
+
+    fn get(self: *@This(), alloc: Allocator) ![]const u8 {
+        return self.dir orelse {
+            const d = try introspect.resolveGlobalCacheDir(alloc);
+            self.dir = d;
+            return d;
+        };
+    }
+};
+
+
+/// Use <global_cache_dir>/per-project/<project_dir> as the local cache dir
+fn getLocalCacheDir(
+    project_dir: Compilation.Directory,
+    global_cache_dir: *GlobalCacheDir,
+    arena: Allocator,
+) !Compilation.Directory {
+    var buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    const path = try std.fs.path.join(arena, &[_][]const u8{
+        (try global_cache_dir.get(arena)),
+        "per-project",
+        try fs.realpath(project_dir.path orelse ".", &buf),
+    });
+    const dir = try fs.cwd().makeOpenPath(path, .{});
+    return Compilation.Directory{
+        .handle = dir,
+        .path = path,
+    };
+}
+
 fn buildOutputType(
     gpa: Allocator,
     arena: Allocator,
@@ -3190,6 +3223,8 @@ fn buildOutputType(
         };
     }
 
+    var global_cache_dir = GlobalCacheDir{};
+
     var global_cache_directory: Compilation.Directory = l: {
         if (override_global_cache_dir) |p| {
             break :l .{
@@ -3200,7 +3235,7 @@ fn buildOutputType(
         if (builtin.os.tag == .wasi) {
             break :l getWasiPreopen("/cache");
         }
-        const p = try introspect.resolveGlobalCacheDir(arena);
+        const p = try global_cache_dir.get(arena);
         break :l .{
             .handle = try fs.cwd().makeOpenPath(p, .{}),
             .path = p,
@@ -3224,28 +3259,9 @@ fn buildOutputType(
             break :l global_cache_directory;
         }
         if (main_pkg) |pkg| {
-            // search upwards from cwd until we find directory with build.zig
-            const cwd_path = try process.getCwdAlloc(arena);
-            const build_zig = "build.zig";
-            const zig_cache = "zig-cache";
-            var dirname: []const u8 = cwd_path;
-            while (true) {
-                const joined_path = try fs.path.join(arena, &[_][]const u8{ dirname, build_zig });
-                if (fs.cwd().access(joined_path, .{})) |_| {
-                    const cache_dir_path = try fs.path.join(arena, &[_][]const u8{ dirname, zig_cache });
-                    const dir = try pkg.root_src_directory.handle.makeOpenPath(cache_dir_path, .{});
-                    cleanup_local_cache_dir = dir;
-                    break :l .{ .handle = dir, .path = cache_dir_path };
-                } else |err| switch (err) {
-                    error.FileNotFound => {
-                        dirname = fs.path.dirname(dirname) orelse {
-                            break :l global_cache_directory;
-                        };
-                        continue;
-                    },
-                    else => break :l global_cache_directory,
-                }
-            }
+            const dir = try getLocalCacheDir(pkg.root_src_directory, &global_cache_dir, arena);
+            cleanup_local_cache_dir = dir.handle;
+            break :l dir;
         }
         // Otherwise we really don't have a reasonable place to put the local cache directory,
         // so we utilize the global one.
@@ -4577,8 +4593,10 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
         };
         child_argv.items[argv_index_build_file] = build_directory.path orelse cwd_path;
 
+        var global_cache_dir = GlobalCacheDir{};
+
         var global_cache_directory: Compilation.Directory = l: {
-            const p = override_global_cache_dir orelse try introspect.resolveGlobalCacheDir(arena);
+            const p = override_global_cache_dir orelse try global_cache_dir.get(arena);
             break :l .{
                 .handle = try fs.cwd().makeOpenPath(p, .{}),
                 .path = p,
@@ -4595,11 +4613,7 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
                     .path = local_cache_dir_path,
                 };
             }
-            const cache_dir_path = try build_directory.join(arena, &[_][]const u8{"zig-cache"});
-            break :l .{
-                .handle = try build_directory.handle.makeOpenPath("zig-cache", .{}),
-                .path = cache_dir_path,
-            };
+            break :l try getLocalCacheDir(build_directory, &global_cache_dir, arena);
         };
         defer local_cache_directory.handle.close();
 
