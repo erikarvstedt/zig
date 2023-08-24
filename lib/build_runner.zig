@@ -558,7 +558,7 @@ fn printPrefix(node: *PrintNode, stderr: std.fs.File, ttyconf: std.io.tty.Config
     } else {
         try stderr.writeAll(switch (ttyconf) {
             .no_color, .windows_api => "|  ",
-            .escape_codes => "\x1B\x28\x30\x78\x1B\x28\x42  ", // │
+            .escape_codes => "│  ",
         });
     }
 }
@@ -581,12 +581,12 @@ fn printTreeStep(
         if (parent_node.last) {
             try stderr.writeAll(switch (ttyconf) {
                 .no_color, .windows_api => "+- ",
-                .escape_codes => "\x1B\x28\x30\x6d\x71\x1B\x28\x42 ", // └─
+                .escape_codes => "└─ ",
             });
         } else {
             try stderr.writeAll(switch (ttyconf) {
                 .no_color, .windows_api => "+- ",
-                .escape_codes => "\x1B\x28\x30\x74\x71\x1B\x28\x42 ", // ├─
+                .escape_codes => "├─ ",
             });
         }
     }
