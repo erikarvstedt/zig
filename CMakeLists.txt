@@ -111,6 +111,7 @@ set(ZIG_TARGET_TRIPLE "native" CACHE STRING "arch-os-abi to output binaries for"
 set(ZIG_TARGET_MCPU "native" CACHE STRING "-mcpu parameter to output binaries for")
 set(ZIG_SINGLE_THREADED off CACHE BOOL "limit the zig compiler to use only 1 thread")
 set(ZIG_AR_WORKAROUND off CACHE BOOL "append 'ar' subcommand to CMAKE_AR")
+set(ZIG_EXTRA_BUILD_ARGS "" CACHE STRING "Extra arguments passed to the Zig stage3 build")
 
 if("${ZIG_TARGET_TRIPLE}" STREQUAL "native")
     set(ZIG_USE_LLVM_CONFIG ON CACHE BOOL "use llvm-config to find LLVM libraries")
@@ -919,6 +920,7 @@ set(ZIG_BUILD_ARGS
   "-Dtarget=${ZIG_TARGET_TRIPLE}"
   "-Dcpu=${ZIG_TARGET_MCPU}"
   "-Dversion-string=${RESOLVED_ZIG_VERSION}"
+  ${ZIG_EXTRA_BUILD_ARGS}
 )
 
 add_custom_target(stage3 ALL
