@@ -798,6 +798,25 @@ const CliModule = struct {
     };
 };
 
+/// Use <global_cache_dir>/per-project/<project_dir> as the local cache dir
+fn getLocalCacheDir(
+    project_dir: []const u8,
+    global_cache_dir: Compilation.Directory,
+    arena: Allocator,
+) !Compilation.Directory {
+    var buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    const path = try std.fs.path.join(arena, &[_][]const u8{
+        global_cache_dir.path orelse unreachable,
+        "per-project",
+        try fs.realpath(project_dir, &buf),
+    });
+    const dir = try fs.cwd().makeOpenPath(path, .{});
+    return Compilation.Directory{
+        .handle = dir,
+        .path = path,
+    };
+}
+
 fn buildOutputType(
     gpa: Allocator,
     arena: Allocator,
@@ -3099,33 +3118,9 @@ fn buildOutputType(
             break :l global_cache_directory;
         }
 
-        // search upwards from cwd until we find directory with build.zig
-        const cwd_path = try process.getCwdAlloc(arena);
-        const zig_cache = "zig-cache";
-        var dirname: []const u8 = cwd_path;
-        while (true) {
-            const joined_path = try fs.path.join(arena, &.{
-                dirname, Package.build_zig_basename,
-            });
-            if (fs.cwd().access(joined_path, .{})) |_| {
-                const cache_dir_path = try fs.path.join(arena, &.{ dirname, zig_cache });
-                const dir = try fs.cwd().makeOpenPath(cache_dir_path, .{});
-                cleanup_local_cache_dir = dir;
-                break :l .{ .handle = dir, .path = cache_dir_path };
-            } else |err| switch (err) {
-                error.FileNotFound => {
-                    dirname = fs.path.dirname(dirname) orelse {
-                        break :l global_cache_directory;
-                    };
-                    continue;
-                },
-                else => break :l global_cache_directory,
-            }
-        }
-
-        // Otherwise we really don't have a reasonable place to put the local cache directory,
-        // so we utilize the global one.
-        break :l global_cache_directory;
+        const dir = try getLocalCacheDir(main_mod.root.root_dir.path orelse ".", global_cache_directory, arena);
+        cleanup_local_cache_dir = dir.handle;
+        break :l dir;
     };
 
     for (create_module.c_source_files.items) |*src| {
@@ -4945,11 +4940,7 @@ fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
                 .path = local_cache_dir_path,
             };
         }
-        const cache_dir_path = try build_root.directory.join(arena, &[_][]const u8{"zig-cache"});
-        break :l .{
-            .handle = try build_root.directory.handle.makeOpenPath("zig-cache", .{}),
-            .path = cache_dir_path,
-        };
+        break :l try getLocalCacheDir(build_root.directory.path orelse ".", global_cache_directory, arena);
     };
     defer local_cache_directory.handle.close();
 
