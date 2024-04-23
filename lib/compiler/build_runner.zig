@@ -770,7 +770,7 @@ fn printPrefix(node: *PrintNode, stderr: File, ttyconf: std.io.tty.Config) !void
     } else {
         try stderr.writeAll(switch (ttyconf) {
             .no_color, .windows_api => "|  ",
-            .escape_codes => "\x1B\x28\x30\x78\x1B\x28\x42  ", // │
+            .escape_codes => "│  ",
         });
     }
 }
@@ -778,7 +778,7 @@ fn printPrefix(node: *PrintNode, stderr: File, ttyconf: std.io.tty.Config) !void
 fn printChildNodePrefix(stderr: File, ttyconf: std.io.tty.Config) !void {
     try stderr.writeAll(switch (ttyconf) {
         .no_color, .windows_api => "+- ",
-        .escape_codes => "\x1B\x28\x30\x6d\x71\x1B\x28\x42 ", // └─
+        .escape_codes => "└─ ",
     });
 }
 
@@ -941,7 +941,7 @@ fn printTreeStep(
         } else {
             try stderr.writeAll(switch (ttyconf) {
                 .no_color, .windows_api => "+- ",
-                .escape_codes => "\x1B\x28\x30\x74\x71\x1B\x28\x42 ", // ├─
+                .escape_codes => "├─ ",
             });
         }
     }
