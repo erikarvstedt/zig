@@ -46,6 +46,7 @@ node_end_index: u32,
 pub const TerminalMode = union(enum) {
     off,
     ansi_escape_codes,
+    ansi_single_line,
     /// This is not the same as being run on windows because other terminals
     /// exist like MSYS/git-bash.
     windows_api: if (is_windows) WindowsApi else void,
@@ -152,6 +153,10 @@ pub const Node = struct {
             return @enumFromInt(@intFromEnum(i));
         }
 
+        pub fn wrap(i: Node.Index) @This() {
+            return @enumFromInt(@intFromEnum(i));
+        }
+
         fn toParent(i: @This()) Parent {
             assert(@intFromEnum(i) != @intFromEnum(Parent.unused));
             return @enumFromInt(@intFromEnum(i));
@@ -171,6 +176,8 @@ pub const Node = struct {
         pub fn toOptional(i: @This()) OptionalIndex {
             return @enumFromInt(@intFromEnum(i));
         }
+
+        const root: Node.Index = @enumFromInt(0);
     };
 
     /// Create a new child progress node. Thread-safe.
@@ -398,7 +405,18 @@ pub fn start(options: Options) Node {
             const stderr = std.io.getStdErr();
             global_progress.terminal = stderr;
             if (stderr.getOrEnableAnsiEscapeSupport()) {
-                global_progress.terminal_mode = .ansi_escape_codes;
+                if (single_line: {
+                    if (builtin.os.tag == .windows) break :single_line false;
+                    if (posix.getenvZ("TERM")) |term| {
+                        if (std.mem.eql(u8, term, "dumb-emacs-ansi"))
+                            break :single_line true;
+                    }
+                    break :single_line false;
+                }) {
+                    global_progress.terminal_mode = .ansi_single_line;
+                } else {
+                    global_progress.terminal_mode = .ansi_escape_codes;
+                }
             } else if (is_windows and stderr.isTty()) {
                 global_progress.terminal_mode = TerminalMode{ .windows_api = .{
                     .code_page = windows.kernel32.GetConsoleOutputCP(),
@@ -420,7 +438,7 @@ pub fn start(options: Options) Node {
 
             if (switch (global_progress.terminal_mode) {
                 .off => unreachable, // handled a few lines above
-                .ansi_escape_codes => std.Thread.spawn(.{}, updateThreadRun, .{}),
+                .ansi_escape_codes, .ansi_single_line => std.Thread.spawn(.{}, updateThreadRun, .{}),
                 .windows_api => if (is_windows) std.Thread.spawn(.{}, windowsApiUpdateThreadRun, .{}) else unreachable,
             }) |thread| {
                 global_progress.update_thread = thread;
@@ -587,6 +605,8 @@ const save = "\x1b7";
 const restore = "\x1b8";
 const finish_sync = "\x1b[?2026l";
 
+const clear_single_line = "\r\x1b[K";
+
 const TreeSymbol = enum {
     /// ├─
     tee,
@@ -644,7 +664,7 @@ const TreeSymbol = enum {
 
 fn appendTreeSymbol(symbol: TreeSymbol, buf: []u8, start_i: usize) usize {
     switch (global_progress.terminal_mode) {
-        .off => unreachable,
+        .off, .ansi_single_line => unreachable,
         .ansi_escape_codes => {
             const bytes = symbol.escapeSeq();
             buf[start_i..][0..bytes.len].* = bytes.*;
@@ -669,7 +689,12 @@ fn clearWrittenWithEscapeCodes() anyerror!void {
     if (!global_progress.need_clear) return;
 
     global_progress.need_clear = false;
-    try write(clear);
+    try write(
+        if (global_progress.terminal_mode == .ansi_single_line)
+            clear_single_line
+        else
+            clear,
+    );
 }
 
 /// U+25BA or ►
@@ -1103,11 +1128,18 @@ fn computeRedraw(serialized_buffer: *Serialized.Buffer) struct { []u8, usize } {
             buf[i..][0..clear.len].* = clear.*;
             i += clear.len;
         },
+        .ansi_single_line => {
+            i += writeBuf(buf[i..], clear_single_line);
+        },
         .windows_api => if (!is_windows) unreachable,
     }
 
-    const root_node_index: Node.Index = @enumFromInt(0);
-    i, const nl_n = computeNode(buf, i, 0, serialized, children, root_node_index);
+    var nl_n: usize = 0;
+    if (global_progress.terminal_mode == .ansi_single_line) {
+        i = renderNodesSingleLine(buf, i, serialized, children);
+    } else {
+        i, nl_n = computeNode(buf, i, 0, serialized, children, Node.Index.root);
+    }
 
     if (global_progress.terminal_mode == .ansi_escape_codes) {
         if (nl_n > 0) {
@@ -1165,6 +1197,151 @@ fn lineUpperBoundLen(nl_n: usize) usize {
         (1 + (nl_n + 1) * up_one_line.len) +
         finish_sync.len;
 }
+
+fn renderNodesSingleLine(
+    buf: []u8,
+    start_i: usize,
+    serialized: Serialized,
+    children: []const Children,
+) usize {
+    var traverse = TraverseNodes{
+        .serialized = serialized,
+        .children = children,
+    };
+    traverse.run();
+
+    const is_empty_root = serialized.storage[@intFromEnum(Node.Index.root)].name[0] == 0;
+    const ts = &traverse.tree_stats;
+    if (is_empty_root) {
+        ts.num_nodes -= 1;
+    }
+    var i = start_i;
+    {
+        i += (std.fmt.bufPrint(buf[i..], "[{d}", .{ts.num_nodes}) catch &.{}).len;
+        if (ts.total_items_estimated > 0) {
+            i += (std.fmt.bufPrint(buf[i..], " {d}/{d}", .{
+                ts.total_items_estimated_completed,
+                ts.total_items_estimated,
+            }) catch &.{}).len;
+        }
+        if (ts.total_items_completed > 0) {
+            i += (std.fmt.bufPrint(buf[i..], " {d}", .{ts.total_items_completed}) catch &.{}).len;
+        }
+        i += writeBuf(buf[i..], "]");
+    }
+    var node: Node.OptionalIndex = if (is_empty_root)
+        children[@intFromEnum(Node.Index.root)].child
+    else
+        .wrap(Node.Index.root);
+
+    while (node.unwrap()) |n| {
+        const storage = &serialized.storage[@intFromEnum(n)];
+        const estimated = storage.estimated_total_count;
+        const completed = storage.completed_count;
+        const name = if (std.mem.indexOfScalar(u8, &storage.name, 0)) |end| storage.name[0..end] else &storage.name;
+        if (name.len != 0 or estimated > 0) {
+            if (estimated > 0) {
+                i += (std.fmt.bufPrint(buf[i..], " [{d}/{d}]", .{ completed, estimated }) catch &.{}).len;
+            } else if (completed != 0) {
+                i += (std.fmt.bufPrint(buf[i..], " [{d}]", .{completed}) catch &.{}).len;
+            }
+            if (name.len != 0) {
+                i += (std.fmt.bufPrint(buf[i..], " {s}", .{name}) catch &.{}).len;
+            }
+        }
+        node = traverse.deepest_child[@intFromEnum(n)];
+    }
+    return i;
+}
+
+fn writeBuf(buf: []u8, str: anytype) usize {
+    buf[0..str.len].* = str.*;
+    return str.len;
+}
+
+// Traverses the tree of nodes
+// - Collects total tree stats in `tree_stats`
+// - Finds the longest path from root to a child in the tree.
+//   This path is implicitly stored in `deepest_child`.
+//   Its nodes are rendered in a single line by `renderNodesSingleLine`.
+const TraverseNodes = struct {
+    serialized: Serialized,
+    children: []const Children,
+    deepest_child: [node_storage_buffer_len]Node.OptionalIndex = undefined,
+    tree_stats: TreeStats = .{},
+
+    const SiblingData = struct {
+        // For all siblings visited so far, the max depth of a subtree that has a sibling as its root.
+        // If a sibling has no children, the depth is 1.
+        max_depth: u8 = 0,
+        // The sibling node with the deepest subtree
+        max_depth_node: Node.Index,
+    };
+
+    const TreeStats = struct {
+        // Should be large enough to hold the sum of all items of all nodes without overflowing
+        const ItemSum = DoubleCapacityInt(@FieldType(Node.Storage, "completed_count"));
+        const NumNodes = u8;
+        comptime {
+            std.debug.assert(std.math.maxInt(NumNodes) >= node_storage_buffer_len);
+        }
+
+        num_nodes: NumNodes = 0,
+        total_items_estimated: ItemSum = 0,
+        total_items_estimated_completed: ItemSum = 0,
+        // For nodes where no estimated total is given
+        total_items_completed: ItemSum = 0,
+
+        fn DoubleCapacityInt(Int: type) type {
+            return std.meta.Int(.unsigned, @bitSizeOf(Int) * 2);
+        }
+    };
+
+    fn run(self: *@This()) void {
+        var sibling_data = SiblingData{ .max_depth_node = Node.Index.root };
+        self.step(Node.Index.root, 1, &sibling_data);
+    }
+
+    fn step(
+        self: *@This(),
+        // Node to process
+        node: Node.Index,
+        // Depth of `node`, counted from the top.
+        // Root node has depth 1
+        depth: u8,
+        sibling_data: *SiblingData,
+    ) void {
+        {
+            const storage = &self.serialized.storage[@intFromEnum(node)];
+            const estimated = storage.estimated_total_count;
+            const completed = storage.completed_count;
+            const ts = &self.tree_stats;
+            ts.num_nodes += 1;
+            ts.total_items_estimated += estimated;
+            if (estimated > 0) {
+                ts.total_items_estimated_completed += completed;
+            } else {
+                ts.total_items_completed += completed;
+            }
+        }
+        var subtree_depth: u8 = 1;
+        if (self.children[@intFromEnum(node)].child.unwrap()) |child| {
+            var sd = SiblingData{ .max_depth_node = child };
+            self.step(child, depth + 1, &sd);
+            subtree_depth += sd.max_depth;
+            self.deepest_child[@intFromEnum(node)] = .wrap(sd.max_depth_node);
+        } else {
+            self.deepest_child[@intFromEnum(node)] = .none;
+        }
+        if (subtree_depth > sibling_data.max_depth) {
+            sibling_data.max_depth = subtree_depth;
+            sibling_data.max_depth_node = node;
+        }
+        if (self.children[@intFromEnum(node)].sibling.unwrap()) |sibling| {
+            self.step(sibling, depth, sibling_data);
+        }
+    }
+};
 
 fn computeNode(
     buf: []u8,
